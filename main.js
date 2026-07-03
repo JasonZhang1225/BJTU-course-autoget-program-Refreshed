@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
@@ -8,8 +8,12 @@ const storage = require('electron-json-storage');
 var kill = require('tree-kill');
 
 let mainWindow;
-let exePath = path.join(__dirname, "./src/bjtupythonstub.exe"); // 使用 path.join 构建正确的路径
-let pythonPath = path.join(__dirname, "./src/login.py"); // 使用 path.join 构建正确的路径
+const isMac = process.platform === "darwin";
+let exePath = isMac
+  ? "python3"
+  : path.join(__dirname, "./src/bjtupythonstub.exe");
+let stubPath = path.join(__dirname, "./python/bjtupythonstub.py");
+let pythonPath = path.join(__dirname, "./src/login.py");
 let modelPath = path.join(__dirname, "./src/omis.onnx");
 
 let ws = null; // 全局 WebSocket 对象
@@ -32,14 +36,19 @@ function createWindow() {
   // mainWindow.webContents.openDevTools();
   console.log('exePath:', exePath);
 
-  exePath = exePath.replace('app.asar', 'app.asar.unpacked');
+  if (isMac) {
+    stubPath = stubPath.replace('app.asar', 'app.asar.unpacked');
+  } else {
+    exePath = exePath.replace('app.asar', 'app.asar.unpacked');
+  }
   pythonPath = pythonPath.replace('app.asar', 'app.asar.unpacked');
   modelPath = modelPath.replace('app.asar', 'app.asar.unpacked');
 
-  if (fs.existsSync(exePath) && fs.existsSync(modelPath) && fs.existsSync(pythonPath)) {
-    console.log('login.exe 文件存在');
+  const stubOrExePath = isMac ? stubPath : exePath;
+  if (fs.existsSync(stubOrExePath) && fs.existsSync(modelPath) && fs.existsSync(pythonPath)) {
+    console.log(`${isMac ? 'stub' : 'exe'} 文件存在`);
   } else {
-    dialog.showErrorBox('错误', `${exePath}, login.exe 文件不存在`);
+    dialog.showErrorBox('错误', `${stubOrExePath}, 文件不存在`);
     app.quit();
   }
 
@@ -100,6 +109,13 @@ function waitForServerReady(onReady, onRetry) {
 ipcMain.handle("get-ws-status", () => { return wsStatus; })
 function checkAndKillPort() {
   return new Promise((resolve, reject) => {
+    if (isMac) {
+      exec("lsof -ti :8765 | xargs kill -9", (error, stdout, stderr) => {
+        // lsof may return error if no process is found, which is fine
+        resolve();
+      });
+      return;
+    }
     exec('netstat -ano | findstr :8765', async (error, stdout) => {
       if (stdout) {
         // 解析输出行
@@ -152,7 +168,9 @@ function checkAndKillPort() {
 ipcMain.handle("start-server", async (event) => {
   if (pythonProcess == null) {
     await checkAndKillPort();
-    pythonProcess = spawn(exePath, [pythonPath]);
+    pythonProcess = isMac
+      ? spawn("python3", [stubPath, pythonPath])
+      : spawn(exePath, [pythonPath]);
 
     console.log(pythonProcess.pid)
     pythonProcess.stdout.on("data", (data) => {
@@ -215,6 +233,14 @@ ipcMain.handle("stop-server", () => {
 ipcMain.on('open-link-externally', (event, url) => {
   console.log('open-link-externally', url);
   shell.openExternal(url);
+});
+
+ipcMain.on('show-notification', (event, { title, body }) => {
+  if (!Notification.isSupported()) {
+    console.log('当前系统不支持桌面通知');
+    return;
+  }
+  new Notification({ title, body }).show();
 });
 
 ipcMain.handle('readConfig', () => {

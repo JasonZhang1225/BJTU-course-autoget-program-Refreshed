@@ -1,11 +1,12 @@
 {
   "name": "web-get-course",
   "author": "hyskr",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win --x64",
+    "dist:mac": "electron-builder --mac --arm64"
   },
   "license": "MIT",
   "devDependencies": {
@@ -23,13 +24,32 @@
     "directories": {
       "output": "dist"
     },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "static/**/*",
+      "src/login.py",
+      "src/omis.onnx",
+      "src/icon.ico",
+      "src/icon.icns",
+      "python/bjtupythonstub.py",
+      "src/bjtupythonstub.exe",
+      "package.json",
+      "!**/.DS_Store"
+    ],
     "win": {
       "icon": "src/icon.ico"
     },
+    "mac": {
+      "icon": "src/icon.icns",
+      "target": "dmg"
+    },
     "asarUnpack": [
-      "src/bjtupythonstub.exe",
+      "src/login.py",
       "src/omis.onnx",
-      "src/login.py"
+      "python/bjtupythonstub.py",
+      "src/bjtupythonstub.exe"
     ]
   }
 }

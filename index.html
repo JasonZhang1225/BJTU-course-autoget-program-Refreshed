@@ -379,6 +379,16 @@
         div.logview {
             height: 50vh;
         }
+
+        .quota-table th {
+            background: #11557C;
+            color: white;
+            padding: 5px;
+        }
+
+        .quota-changed {
+            background: #fff49c;
+        }
     </style>
 </head>
 
@@ -450,6 +460,13 @@
                                 </td>
                             </tr>
                             <tr>
+                                <td><label for="monitor-only">只监控不抢课</label></td>
+                                <td><input type="checkbox" id="monitor-only" name="monitor-only" v-model="monitorOnly">
+                                </td>
+                                <td>
+                                </td>
+                            </tr>
+                            <tr>
                                 <td colspan="3">
                                     <button type="button" @click="isRunning ? stopProcess() : login()"
                                         :class="{ 'disabled-button': (!isValidCourseList || !serverReady || !courseType) }">
@@ -476,7 +493,7 @@
                 </div>
             </div>
             <div class="traceback" id="traceback-r"
-                style="table-layout: fixed; display: flex; justify-content: center; align-items: center;">
+                style="table-layout: fixed; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px;">
                 <table style="width: 70%;">
                     <colgroup>
                         <col style="width: 50%;" />
@@ -512,6 +529,27 @@
                             <button @click="fetchBalance">获取余额</button>
                         </td>
                     </tr>
+                </table>
+
+                <table class="quota-table" style="width: 90%;">
+                    <colgroup>
+                        <col style="width: 65%;" />
+                        <col style="width: 35%;" />
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th colspan="2">课程余量监控</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-if="quotas.length === 0">
+                            <td colspan="2" style="color: #888;">暂无数据</td>
+                        </tr>
+                        <tr v-for="q in quotas" :key="q.name" :class="{ 'quota-changed': q.justChanged }">
+                            <td>{{ q.name }}</td>
+                            <td>{{ q.quota }}</td>
+                        </tr>
+                    </tbody>
                 </table>
 
             </div>
@@ -557,9 +595,11 @@
                 serverReady: false,
                 serverOnload: false,
                 seniorCheck: false, // 是否抢高级课程，默认为false
+                monitorOnly: false, // 只监控不抢课，默认为false
                 balance: NaN,
                 imageUrl: "",
                 isRunning: false,
+                quotas: [], // 课程余量监控面板数据
             },
             computed: {
                 isValidCourseList() {
@@ -588,7 +628,8 @@
                         apiPassword,
                         courseList: this.courseList,
                         courseType: this.courseType,
-                        seniorCheck: this.seniorCheck
+                        seniorCheck: this.seniorCheck,
+                        monitorOnly: this.monitorOnly
                     });
                     this.fetchBalance();
                     send('login-request', {
@@ -598,7 +639,8 @@
                         apiPassword,
                         courseList: this.courseList,
                         courseType: this.courseType,
-                        seniorCheck: this.seniorCheck
+                        seniorCheck: this.seniorCheck,
+                        monitorOnly: this.monitorOnly
                     });
                     this.isRunning = true;
                 },
@@ -676,6 +718,28 @@
                         captchaTime.innerHTML = data.process_time;
                     } else if (data.command === 'finished' || data.command === 'Python error') {
                         this.isRunning = false;
+                    } else if (data.command === 'quota-snapshot') {
+                        // 余量快照：更新面板，不进日志（每 2s 一次，避免刷屏）
+                        this.quotas = data.courses.map(c => ({ ...c, justChanged: false }));
+                    } else if (data.command === 'quota-change') {
+                        // 余量从 0 变有：高亮面板对应行 + 桌面通知 + 日志条目
+                        this.quotas = this.quotas.map(q =>
+                            q.name === data.course ? { ...q, quota: data.quota, justChanged: true } : q
+                        );
+                        send('show-notification', {
+                            title: '余量变化',
+                            body: `${data.course} 余量: ${data.quota}`
+                        });
+                        this.messages.push({
+                            command: '余量变化',
+                            std: `${data.course} 余量变为 ${data.quota}`
+                        });
+                        this.scrollToBottom();
+                    } else if (data.command === 'grab-success') {
+                        // 抢课成功：桌面通知 + 日志
+                        send('show-notification', { title: '抢课成功', body: data.std });
+                        this.messages.push(data);
+                        this.scrollToBottom();
                     } else {
                         console.log(data);
                         this.messages.push(data);
@@ -690,6 +754,7 @@
                         this.courseList = data.courseList || '';
                         this.courseType = data.courseType || '';
                         this.seniorCheck = data.seniorCheck || false;
+                        this.monitorOnly = data.monitorOnly || false;
                         this.messages.push({
                             "command": "初始化",
                             "std": "读取配置成功"
