@@ -3,3 +3,14 @@ node_modules/
 bjtupythonstub.exe
 __pycache__/
 build/
+
+# macOS / 编辑器 / 本地杂项
+.DS_Store
+.claude/
+11log
+
+# 参考脚本（不纳入仓库）
+油猴脚本.js
+
+# 与 yarn.lock 重复，用 yarn 时不需要 package-lock.json
+package-lock.json

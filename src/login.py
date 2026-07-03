@@ -8,6 +8,7 @@ import re
 import signal
 import sys
 import time
+import traceback
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Union
@@ -89,6 +90,7 @@ class CourseConfig:
     api_username: str
     api_password: str
     senior_check: bool
+    monitor_only: bool
     course_list: List[str]
     username: str
     password: str
@@ -103,6 +105,7 @@ class CourseConfig:
             "apiPassword",
             "courseList",
             "seniorCheck",
+            "monitorOnly",
             "username",
             "password",
             "modelPath",
@@ -116,6 +119,7 @@ class CourseConfig:
             api_password=data["apiPassword"],
             course_list=[course.strip() for course in data["courseList"].split(",")],
             senior_check=data["seniorCheck"],
+            monitor_only=data["monitorOnly"],
             username=data["username"],
             password=data["password"],
             model_path=data["modelPath"],
@@ -142,25 +146,17 @@ class CourseGrabber:
         )
         self.cookie = None
         self.session = requests.Session()
+        self.last_quotas: Dict[str, int] = {}
 
-    async def login(self) -> Dict[str, str]:
-        """登录获取会话"""
-        try:
-            async for message in self.get_cookie():
-                yield message
-            yield {"command": "登录", "std": "登录成功"}
-        except Exception as e:
-            yield {"command": "error", "error": f"登录失败: {str(e)}"}
-            return
-
-    async def get_cookie(
-        self,
-    ) -> Generator[Union[requests.Session, Dict[str, str]], None, None]:
-        """获取登录Cookie"""
+    async def login(self, send) -> None:
+        """登录获取会话。send 是一个 async 回调，用于把消息发给前端。
+        不用 async generator，避免耗尽/清理时在某些环境下卡死。"""
+        async def emit(msg):
+            await send(msg)
         try:
             self.session.headers.update(self.BASE_HEADERS)
 
-            yield {"command": "登录", "std": "正在获取验证码..."}
+            await emit({"command": "登录", "std": "正在获取验证码..."})
             response = await asyncio.to_thread(self._get_initial_page, self.session)
 
             login_info = await asyncio.to_thread(
@@ -170,29 +166,41 @@ class CourseGrabber:
             captcha_result = await asyncio.to_thread(
                 self._handle_captcha, self.session, login_info["captcha_id"]
             )
-            yield captcha_result
+            await emit(captcha_result)
 
-            yield {"command": "登录", "std": "正在登录..."}
+            await emit({"command": "登录", "std": "正在登录..."})
             response = await asyncio.to_thread(
                 self._do_login, self.session, login_info, captcha_result["result"]
             )
 
-            yield {"command": "登录", "std": "正在获取用户信息..."}
+            await emit({"command": "登录", "std": "正在获取用户信息..."})
             await asyncio.to_thread(self._handle_redirects, self.session, response)
 
             self.username = await asyncio.to_thread(self._get_username, self.session)
-            yield {"command": "登录", "std": f"{self.username}, 登录成功!"}
+            await emit({"command": "登录", "std": f"{self.username}, 登录成功!"})
             self.cookie = self.session.cookies.get_dict()
+            await emit({"command": "登录", "std": "登录成功"})
         except requests.exceptions.RequestException as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            line_no = exc_traceback.tb_lineno
-            func_name = exc_traceback.tb_frame.f_code.co_name
-            raise Exception(f"网络请求失败: {str(e), {line_no}, {func_name}}")
+            await emit({"command": "error", "error": f"登录失败: 网络请求失败: {str(e)}"})
+            return
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            line_no = exc_traceback.tb_lineno
-            func_name = exc_traceback.tb_frame.f_code.co_name
-            raise Exception(f"{str(e), {line_no}, {func_name}}")
+            # 遍历到最内层栈帧，给出真正出错的函数名和行号
+            tb = e.__traceback__
+            deepest = tb
+            while tb is not None:
+                deepest = tb
+                tb = tb.tb_next
+            inner_func = deepest.tb_frame.f_code.co_name
+            inner_line = deepest.tb_lineno
+            await emit({
+                "command": "error",
+                "error": (
+                    f"登录失败: {str(e)} [出错函数: {inner_func}() 第{inner_line}行]\n"
+                    f"{traceback.format_exc()}"
+                ),
+            })
+            return
+            return
 
     def _get_initial_page(self, session: requests.Session) -> requests.Response:
         """获取初始登录页面"""
@@ -291,7 +299,14 @@ class CourseGrabber:
         session.get(url, allow_redirects=False)
 
         response = session.get("https://mis.bjtu.edu.cn/module/module/10/")
-        url = re.findall(r"<form action=\"(.*?)\"", response.text)[0]
+        forms = re.findall(r"<form action=\"(.*?)\"", response.text)
+        if not forms:
+            snippet = response.text[:300]
+            raise Exception(
+                f"登录后重定向失败：在 mis.bjtu.edu.cn/module/module/10/ 页面未找到 <form> "
+                f"(HTTP {response.status_code})，可能未真正登录成功。页面片段: {snippet!r}"
+            )
+        url = forms[0]
 
         session.headers.update(
             {
@@ -302,7 +317,7 @@ class CourseGrabber:
         session.get(url, allow_redirects=False)
 
     def _get_username(self, session: requests.Session) -> str:
-        """获取用户名"""
+        """获取用户名（仅用于日志展示，失败不应阻断登录/抢课主流程）"""
         url = "https://aa.bjtu.edu.cn/schoolcensus/schoolcensus/stucensuscard/"
         session.headers.update(
             {
@@ -310,8 +325,19 @@ class CourseGrabber:
                 "referer": "https://aa.bjtu.edu.cn/notice/item/",
             }
         )
-        response = session.get(url)
-        return re.findall("<small>欢迎您，</small>(.*)\n", response.text)[0]
+        try:
+            response = session.get(url, timeout=10)
+            matches = re.findall("<small>欢迎您，</small>(.*)\n", response.text)
+            if matches:
+                return matches[0]
+            # URL 已失效（HTTP 404 等）或页面结构变更：回退占位，不阻断主流程
+            print(
+                f"[警告] 获取用户名失败 (HTTP {response.status_code})，"
+                f"URL 可能已失效: {url}。使用占位用户名继续。"
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"[警告] 获取用户名网络异常: {e}。使用占位用户名继续。")
+        return "用户"
 
     async def grab_course(self) -> Dict[str, str]:
         try:
@@ -408,6 +434,9 @@ class CourseGrabber:
         messages = re.findall(r'message \+= "(.*)<br/>";', text)
         if messages:
             yield {"command": "抢课", "std": messages[0]}
+            # 抢课成功时额外标记，前端据此发桌面通知
+            if "成功" in messages[0]:
+                yield {"command": "grab-success", "std": messages[0]}
 
     async def fetch_and_handle_data(self) -> Generator[Dict[str, Any], None, None]:
         """获取并处理课程数据"""
@@ -415,7 +444,14 @@ class CourseGrabber:
             # 获取所有课程数据
             courses = self.get_available_courses()
             if not courses:
-                yield {"command": "选课", "error": "数据未成功获取..."}
+                yield {
+                    "command": "选课",
+                    "error": (
+                        f"未获取到符合条件的课程（筛选关键词：{', '.join(self.config.course_list)}，"
+                        f"类型：{self.config.course_type}）。请确认选课列表填写正确、"
+                        f"且当前处于选课开放时段。"
+                    ),
+                }
                 return
 
             # 生成状态信息
@@ -457,6 +493,31 @@ class CourseGrabber:
             if course_info:
                 yield {"command": "选课", "std": course_info}
 
+            # 发送余量快照给前端面板（不进日志，每轮都发）
+            yield {
+                "command": "quota-snapshot",
+                "courses": [
+                    {
+                        "name": re.sub(r"\s+", " ", c["name"].strip()),
+                        "quota": int(c["number"]),
+                    }
+                    for c in available_courses
+                ],
+            }
+
+            # 检测余量变化：仅当上一轮为 0、本轮 > 0 时通知
+            for course in available_courses:
+                course_id = course["id"]
+                curr = int(course["number"])
+                prev = self.last_quotas.get(course_id)
+                if prev is not None and prev == 0 and curr > 0:
+                    yield {
+                        "command": "quota-change",
+                        "course": re.sub(r"\s+", " ", course["name"].strip()),
+                        "quota": curr,
+                    }
+                self.last_quotas[course_id] = curr
+
             # 尝试选课
             for course in available_courses:
                 if int(course["number"]) > 0:
@@ -467,15 +528,21 @@ class CourseGrabber:
                         f"{course['teacher']}, {course['number']}",
                     }
 
+                    # 仅监控模式：不发选课请求，只记录
+                    if self.config.monitor_only:
+                        yield {
+                            "command": "监控",
+                            "std": f"检测到余量 {course_name} {course['number']}，监控模式未提交",
+                        }
+                        continue
+
                     # 提交选课
                     async for result in self.submit_course(course["id"]):
                         yield result
 
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            line_no = exc_traceback.tb_lineno
-            func_name = exc_traceback.tb_frame.f_code.co_name
-            raise Exception(f"{str(e), {line_no}, {func_name}}")
+            # 保留原始异常信息，不再用模糊的 (msg, {line}, {func}) 覆盖
+            raise
 
     def get_available_courses(self) -> List[Dict[str, str]]:
         """获取可选课程列表"""
@@ -501,7 +568,13 @@ class CourseGrabber:
 
             tables = soup.find_all("table")
             if not tables or len(tables) < table_id + 1:
-                return []
+                snippet = response.text[:400]
+                raise Exception(
+                    f"获取课程列表失败：{self.config.course_type} 课页面未找到表格 "
+                    f"(URL={url}, HTTP {response.status_code}, "
+                    f"找到 {len(tables)} 个 table，需要第 {table_id} 个)。"
+                    f"可能未进入选课阶段或页面结构已变。页面片段: {snippet!r}"
+                )
             courses = []
 
             for row in tables[table_id].find_all("tr"):
@@ -529,10 +602,8 @@ class CourseGrabber:
             return courses
 
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            line_no = exc_traceback.tb_lineno
-            func_name = exc_traceback.tb_frame.f_code.co_name
-            raise Exception(f"{str(e), {line_no}, {func_name}}")
+            # 保留原始异常信息，不再用模糊的 (msg, {line}, {func}) 覆盖
+            raise
 
     def _check_course_valid(self, course: Dict[str, str]) -> bool:
         """检查课程是否符合选课条件"""
@@ -611,8 +682,12 @@ class WebSocketServer:
         self.grabbers[client_id] = grabber
         grabber.running = True
 
-        async for result in grabber.login():
-            await websocket.send(json.dumps(result))
+        async def _send(msg):
+            await websocket.send(json.dumps(msg))
+        try:
+            await grabber.login(_send)
+        except Exception as e:
+            print(f"登录阶段异常: {e}", flush=True)
         while grabber.running and not websocket.closed:
             async for result in grabber.grab_course():
                 await websocket.send(json.dumps(result))

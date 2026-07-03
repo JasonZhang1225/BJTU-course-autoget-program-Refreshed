@@ -28,16 +28,14 @@ class GracefulExit(SystemExit):
     code = 0
 
 
-loop = asyncio.get_event_loop()
+async def main():
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
 
+    def raise_graceful_exit(*args):
+        stop_event.set()
+        print("Gracefully shutdown")
 
-def raise_graceful_exit(*args):
-    loop.stop()
-    print("Gracefully shutdown")
-    raise GracefulExit()
-
-
-def main():
     signal.signal(signal.SIGINT, raise_graceful_exit)
     signal.signal(signal.SIGTERM, raise_graceful_exit)
 
@@ -60,19 +58,14 @@ def main():
         sys.exit(1)
 
     server = WebSocketServer()
-    start_server = websockets.serve(server.handle_connection, server.host, server.port)
     print("WebSocket Starting...")
     print(f"Current PID: {os.getpid()}")
 
-    try:
-        loop.run_until_complete(start_server)
-        loop.run_forever()
-    except GracefulExit:
-        pass
-    finally:
-        loop.close()
+    async with websockets.serve(server.handle_connection, server.host, server.port):
+        await stop_event.wait()
+
     print("WebSocket Closed")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
