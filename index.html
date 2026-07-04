@@ -547,10 +547,17 @@
                         </tr>
                         <tr v-for="q in quotas" :key="q.name" :class="{ 'quota-changed': q.justChanged }">
                             <td>{{ q.name }}</td>
-                            <td>{{ q.quota }}</td>
+                            <td>
+                                <span v-if="q.selected" style="color: green; font-weight: bold;">已选到</span>
+                                <span v-else>{{ q.quota }}</span>
+                            </td>
                         </tr>
                     </tbody>
                 </table>
+
+                <div style="margin-top: 10px; font-size: 15px;">
+                    抢课用时：<span style="font-weight: bold;">{{ timerDisplay }}</span>
+                </div>
 
             </div>
         </div>
@@ -600,6 +607,12 @@
                 imageUrl: "",
                 isRunning: false,
                 quotas: [], // 课程余量监控面板数据
+                // 计时器状态
+                timerState: 'idle',     // idle | running | paused | finished
+                timerAccumulated: 0,    // 累计毫秒（不含当前进行段）
+                timerResumeAt: null,    // 当前段开始时间戳
+                timerDisplay: '00:00',  // 显示文本
+                timerIntervalId: null,  // setInterval id
             },
             computed: {
                 isValidCourseList() {
@@ -643,8 +656,10 @@
                         monitorOnly: this.monitorOnly
                     });
                     this.isRunning = true;
+                    this.timerStart();
                 },
                 stopProcess() {
+                    this.timerPause();
                     invoke('stop-request');
                 },
                 addMessage(newMessage) {
@@ -688,6 +703,7 @@
                 },
                 stopServer() {
                     this.serverOnload = true;
+                    this.timerFinish();
                     invoke('stop-server').then(data => {
                         console.log(data);
                         this.serverOnload = false;
@@ -697,6 +713,49 @@
                 },
                 openInBrowser(url) {
                     send('open-link-externally', url);
+                },
+                // === 计时器 ===
+                timerStart() {
+                    if (this.timerState === 'running') return;
+                    if (this.timerState !== 'paused') {
+                        this.timerAccumulated = 0;
+                    }
+                    this.timerResumeAt = Date.now();
+                    this.timerState = 'running';
+                    this._timerTick();
+                },
+                timerPause() {
+                    if (this.timerState !== 'running') return;
+                    this.timerAccumulated += Date.now() - this.timerResumeAt;
+                    this.timerResumeAt = null;
+                    this.timerState = 'paused';
+                    clearInterval(this.timerIntervalId);
+                    this.timerIntervalId = null;
+                    this._updateTimerDisplay();
+                },
+                timerFinish() {
+                    if (this.timerState === 'running') {
+                        this.timerAccumulated += Date.now() - this.timerResumeAt;
+                        this.timerResumeAt = null;
+                    }
+                    this.timerState = 'finished';
+                    clearInterval(this.timerIntervalId);
+                    this.timerIntervalId = null;
+                    this._updateTimerDisplay();
+                },
+                _timerTick() {
+                    if (this.timerIntervalId) clearInterval(this.timerIntervalId);
+                    this.timerIntervalId = setInterval(() => this._updateTimerDisplay(), 1000);
+                },
+                _updateTimerDisplay() {
+                    let total = this.timerAccumulated;
+                    if (this.timerState === 'running' && this.timerResumeAt) {
+                        total += Date.now() - this.timerResumeAt;
+                    }
+                    const s = Math.floor(total / 1000);
+                    const m = Math.floor(s / 60);
+                    const sec = s % 60;
+                    this.timerDisplay = `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
                 },
             },
             created() {
@@ -718,9 +777,19 @@
                         captchaTime.innerHTML = data.process_time;
                     } else if (data.command === 'finished' || data.command === 'Python error') {
                         this.isRunning = false;
+                        // 停止时已由 stopProcess 主动 timerPause；
+                        // 若此时仍是 running，说明是后端自动结束（抢课完成或出错），定格
+                        if (this.timerState === 'running') {
+                            this.timerFinish();
+                        }
                     } else if (data.command === 'quota-snapshot') {
                         // 余量快照：更新面板，不进日志（每 2s 一次，避免刷屏）
-                        this.quotas = data.courses.map(c => ({ ...c, justChanged: false }));
+                        this.quotas = data.courses.map(c => ({
+                            name: c.name,
+                            quota: c.quota,
+                            selected: !!c.selected,
+                            justChanged: false,
+                        }));
                     } else if (data.command === 'quota-change') {
                         // 余量从 0 变有：高亮面板对应行 + 桌面通知 + 日志条目
                         this.quotas = this.quotas.map(q =>
