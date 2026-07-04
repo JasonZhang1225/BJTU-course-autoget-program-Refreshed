@@ -389,13 +389,30 @@
         .quota-changed {
             background: #fff49c;
         }
+
+        .failure-captcha_error td:last-child {
+            color: #e67e22;
+        }
+
+        .failure-quota_zero td:last-child {
+            color: #888;
+        }
+
+        .failure-other td:last-child {
+            color: #e74c3c;
+        }
+
+        .record-success td:last-child {
+            color: #27ae60;
+            font-weight: bold;
+        }
     </style>
 </head>
 
 <body style="background-color: #fff; height: 95vh;">
     <div id="app">
-        <div class="traceback" style="display: grid; grid-template-columns: 3fr 1fr; gap: 20px;">
-            <div class="traceback" id="traceback-l">
+        <div class="traceback" style="display: flex; gap: 20px; height: 95vh; overflow: hidden;">
+            <div class="traceback" id="traceback-l" style="flex: 3; overflow-y: auto; min-height: 0;">
                 <div id="form-container">
                     <form id="login-form" @submit.prevent="login">
                         <table>
@@ -491,9 +508,37 @@
                         </table>
                     </form>
                 </div>
+
+                <div class="logview" id="traceback" style="margin-top: 20px; height: auto;">
+                    <div id="message-list" ref="messageList" class="message-list" style="max-height: none;">
+                        <div v-for="(c, i) in reversedMessages" :key="messages.length - 1 - i">
+                            <div v-if="c.success">
+                                <code>
+                                        <pre class="success">{{ c.success }}</pre>
+                                    </code>
+                            </div>
+                            <div
+                                v-if="c.command && (!reversedMessages[i - 1] || reversedMessages[i - 1].command !== c.command) && c.command !== 'finished'">
+                                <code>
+                                        <pre class="command" :id="'cmd_' + i.toString()"> {{ c.command }}</pre>
+                                    </code>
+                            </div>
+                            <div v-if="c.error">
+                                <code>
+                                        <pre class="err">{{ c.error }}</pre>
+                                    </code>
+                            </div>
+                            <div v-if="c.std">
+                                <code>
+                                        <pre>{{ c.std }}</pre>
+                                    </code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div class="traceback" id="traceback-r"
-                style="table-layout: fixed; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px;">
+                style="flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px; overflow-y: auto; min-height: 0;">
                 <table style="width: 70%;">
                     <colgroup>
                         <col style="width: 50%;" />
@@ -552,38 +597,40 @@
                     </tbody>
                 </table>
 
+                <div style="width: 90%; max-height: 180px; overflow-y: scroll; overflow-x: hidden; overscroll-behavior: contain;">
+                    <table class="quota-table failure-table" style="width: 100%; border-collapse: separate; border-spacing: 0;">
+                        <colgroup>
+                            <col style="width: 28%;" />
+                            <col style="width: 18%;" />
+                            <col style="width: 54%;" />
+                        </colgroup>
+                        <thead style="position: sticky; top: 0; z-index: 1; overflow-anchor: none;">
+                            <tr>
+                                <th colspan="3" style="background: #11557C;">选课成功失败记录</th>
+                            </tr>
+                            <tr>
+                                <th style="background: #11557C;">课程</th>
+                                <th style="background: #11557C;">时间</th>
+                                <th style="background: #11557C;">结果</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-if="records.length === 0">
+                                <td colspan="3" style="color: #888;">暂无记录</td>
+                            </tr>
+                            <tr v-for="r in records" :key="r.id" :class="r.reason_type === 'success' ? 'record-success' : 'failure-' + r.reason_type">
+                                <td>{{ r.course_name }}</td>
+                                <td>{{ r.time }}</td>
+                                <td>{{ r.reason_raw }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
                 <div style="margin-top: 10px; font-size: 15px;">
                     抢课用时：<span style="font-weight: bold;">{{ timerDisplay }}</span>
                 </div>
 
-            </div>
-        </div>
-
-        <div class="traceback logview" id="traceback">
-            <div id="message-list" ref="messageList" class="message-list">
-                <div v-for="(c, i) in messages" :key="i">
-                    <div v-if="c.success">
-                        <code>
-                                <pre class="success">{{ c.success }}</pre>
-                            </code>
-                    </div>
-                    <div
-                        v-if="c.command && (!messages[i - 1] || messages[i - 1].command !== c.command) && c.command !== 'finished'">
-                        <code>
-                                <pre class="command" :id="'cmd_' + i.toString()"> {{ c.command }}</pre>
-                            </code>
-                    </div>
-                    <div v-if="c.error">
-                        <code>
-                                <pre class="err">{{ c.error }}</pre>
-                            </code>
-                    </div>
-                    <div v-if="c.std">
-                        <code>
-                                <pre>{{ c.std }}</pre>
-                            </code>
-                    </div>
-                </div>
             </div>
         </div>
     </div>
@@ -603,6 +650,8 @@
                 imageUrl: "",
                 isRunning: false,
                 quotas: [], // 课程余量监控面板数据
+                records: [], // 选课成功失败记录，永久保留
+                recordIdSeq: 0, // 记录自增主键，做 v-for key
                 manualCaptcha: "",
                 // 计时器状态
                 timerState: 'idle',     // idle | running | paused | finished
@@ -615,6 +664,10 @@
                 isValidCourseList() {
                     const courseListPattern = /^([\w\s\u4e00-\u9fa5]+,)*[\w\s\u4e00-\u9fa5]+$/;
                     return courseListPattern.test(this.courseList);
+                },
+                // \u65e5\u5fd7\u5012\u5e8f\uff1a\u65b0\u7684\u5728\u6700\u4e0a\u9762\u3002messages \u4fdd\u6301\u65f6\u95f4\u6b63\u5e8f\uff0c\u6e32\u67d3\u65f6\u53cd\u8f6c\u3002
+                reversedMessages() {
+                    return this.messages.slice().reverse();
                 }
             },
             methods: {
@@ -660,10 +713,15 @@
                 },
                 addMessage(newMessage) {
                     this.messages.push(newMessage);
-                    this.scrollToBottom();
+                    this.scrollToTopIfAtTop();
                 },
-                scrollToBottom() {
-                    this.$refs.messageList.scrollTop = this.$refs.messageList.scrollHeight;
+                // 倒序渲染：顶部是最新。用户若已在顶部，新消息来自动滚到顶；用户在往下看历史时不打扰。
+                scrollToTopIfAtTop() {
+                    const el = this.$refs.messageList;
+                    if (!el) return;
+                    if (el.scrollTop <= 10) {
+                        el.scrollTop = 0;
+                    }
                 },
                 submitManualCaptcha() {
                     const answer = this.manualCaptcha.trim();
@@ -784,12 +842,38 @@
                             command: '余量变化',
                             std: `${data.course} 余量变为 ${data.quota}`
                         });
-                        this.scrollToBottom();
+                        this.scrollToTopIfAtTop();
                     } else if (data.command === 'grab-success') {
-                        // 抢课成功：桌面通知 + 日志
+                        // 抢课成功：桌面通知 + 日志 + 立即把对应行标成已选 + 记录到成功失败记录
                         send('show-notification', { title: '抢课成功', body: data.std });
+                        if (data.course_name) {
+                            this.quotas = this.quotas.map(q =>
+                                q.name === data.course_name ? { ...q, selected: true } : q
+                            );
+                        }
+                        this.records.unshift({
+                            id: ++this.recordIdSeq,
+                            course_name: data.course_name,
+                            time: data.time,
+                            reason_raw: data.std,
+                            reason_type: 'success',
+                        });
                         this.messages.push(data);
-                        this.scrollToBottom();
+                        this.scrollToTopIfAtTop();
+                    } else if (data.command === 'grab-failed') {
+                        // 选课失败：记录区（永久保留，新记录放最上面）+ 日志同步一条
+                        this.records.unshift({
+                            id: ++this.recordIdSeq,
+                            course_name: data.course_name,
+                            time: data.time,
+                            reason_raw: data.reason_raw,
+                            reason_type: data.reason_type,
+                        });
+                        this.messages.push({
+                            command: '抢课失败',
+                            error: `${data.course_name} ${data.time} ${data.reason_raw}`,
+                        });
+                        this.scrollToTopIfAtTop();
                     } else {
                         console.log(data);
                         this.messages.push(data);
@@ -828,7 +912,7 @@
                 });
             },
             updated() {
-                this.scrollToBottom();
+                this.$nextTick(() => this.scrollToTopIfAtTop());
             }
         });
     </script>

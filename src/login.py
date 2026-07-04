@@ -124,6 +124,18 @@ def qwen_ocr(img: bytes, api_key: str, base_url: str) -> dict:
         return {"success": False, "message": f"Qwen OCR 响应解析失败: {e}"}
 
 
+def classify_failure(reason: str) -> str:
+    """分类失败原因: captcha_error | quota_zero | other
+
+    分类只用于前端配色，原样系统文本由调用方保留。
+    """
+    if "验证码" in reason:
+        return "captcha_error"
+    if "余量" in reason or "无课余量" in reason or "无余量" in reason:
+        return "quota_zero"
+    return "other"
+
+
 @dataclass
 class CourseConfig:
     """课程配置数据类"""
@@ -398,8 +410,11 @@ class CourseGrabber:
             yield {"command": "error", "std": f"抢课过程发生错误: {str(e)}"}
             return
 
-    async def submit_course(self, course_id: str):
-        """提交选课请求（Qwen OCR + 手动竞速；验证码错误时刷新重试一次）"""
+    async def submit_course(self, course_id: str, course_name: str = ""):
+        """提交选课请求（Qwen OCR + 手动竞速；验证码错误时刷新重试一次）
+
+        course_name 用于 grab-success / grab-failed 消息，让前端定位看板行。
+        """
         BASE_HEADERS = {
             "accept": "*/*",
             "origin": "https://aa.bjtu.edu.cn",
@@ -416,16 +431,51 @@ class CourseGrabber:
             self.session.headers.pop("content-type", None)
 
             try:
-                response = await asyncio.to_thread(
-                    self.session.get,
-                    "https://aa.bjtu.edu.cn/captcha/refresh/",
-                )
-                key = response.json()["key"]
-                captcha_img_url = f"https://aa.bjtu.edu.cn/captcha/image/{key}"
-                response = await asyncio.to_thread(
-                    self.session.get, captcha_img_url
-                )
-                img = response.content
+                # 刷新并获取验证码图片，校验返回内容，失败立即重试（最多 3 次）
+                # 不做校验时服务器偶发返回 HTML 错误页/空字节，base64 编码后前端显示损坏图标
+                # captcha/refresh 也可能返回空响应(non-JSON)，导致 json() 解析失败
+                img = None
+                key = None
+                for _img_try in range(3):
+                    refresh_resp = await asyncio.to_thread(
+                        self.session.get,
+                        "https://aa.bjtu.edu.cn/captcha/refresh/",
+                    )
+                    # 校验 refresh 响应：必须 200 + JSON + 含 key
+                    try:
+                        if (
+                            refresh_resp.status_code != 200
+                            or len(refresh_resp.content) == 0
+                        ):
+                            continue
+                        key = refresh_resp.json()["key"]
+                    except (ValueError, KeyError):
+                        continue
+                    captcha_img_url = f"https://aa.bjtu.edu.cn/captcha/image/{key}"
+                    img_resp = await asyncio.to_thread(
+                        self.session.get, captcha_img_url
+                    )
+                    if (
+                        img_resp.status_code == 200
+                        and img_resp.headers.get("Content-Type", "").startswith("image/")
+                        and len(img_resp.content) > 0
+                    ):
+                        img = img_resp.content
+                        break
+                    # 校验失败，立即重试，不 sleep
+                if img is None:
+                    yield {
+                        "command": "抢课",
+                        "std": "验证码图片获取失败（服务器限流或会话失效），等待下一轮",
+                    }
+                    yield {
+                        "command": "grab-failed",
+                        "course_name": course_name,
+                        "time": time.strftime("%H:%M:%S"),
+                        "reason_raw": "验证码图片获取失败",
+                        "reason_type": "other",
+                    }
+                    return
                 b64 = "data:image/png;base64," + base64.b64encode(img).decode()
                 yield {
                     "command": "captcha-image",
@@ -454,6 +504,13 @@ class CourseGrabber:
                     yield {
                         "command": "抢课",
                         "error": f"验证码识别失败，放弃本轮: {result.get('message', '')}",
+                    }
+                    yield {
+                        "command": "grab-failed",
+                        "course_name": course_name,
+                        "time": time.strftime("%H:%M:%S"),
+                        "reason_raw": f"验证码识别失败: {result.get('message', '未知错误')}",
+                        "reason_type": "captcha_error",
                     }
                     return
 
@@ -491,16 +548,29 @@ class CourseGrabber:
                 text = response.text
                 messages = re.findall(r'message \+= "(.*)<br/>";', text)
                 if messages:
-                    msg = messages[0]
-                    if "验证码" in msg and attempt == 0:
+                    full_msg = "\n".join(messages)  # 拼接全部，不再只取 messages[0]
+                    if "验证码" in full_msg and attempt == 0:
                         yield {
                             "command": "抢课",
                             "std": "验证码错误，刷新重试...",
                         }
                         continue
-                    yield {"command": "抢课", "std": msg}
-                    if "成功" in msg:
-                        yield {"command": "grab-success", "std": msg}
+                    yield {"command": "抢课", "std": full_msg}
+                    if "成功" in full_msg:
+                        yield {
+                            "command": "grab-success",
+                            "std": full_msg,
+                            "course_name": course_name,
+                            "time": time.strftime("%H:%M:%S"),
+                        }
+                    else:
+                        yield {
+                            "command": "grab-failed",
+                            "course_name": course_name,
+                            "time": time.strftime("%H:%M:%S"),
+                            "reason_raw": full_msg,
+                            "reason_type": classify_failure(full_msg),
+                        }
                     return
 
             except requests.exceptions.RequestException as e:
@@ -510,12 +580,26 @@ class CourseGrabber:
                         "std": f"网络请求失败，刷新重试: {str(e)}",
                     }
                     continue
+                yield {
+                    "command": "grab-failed",
+                    "course_name": course_name,
+                    "time": time.strftime("%H:%M:%S"),
+                    "reason_raw": f"网络请求失败: {str(e)}",
+                    "reason_type": "other",
+                }
                 exc_type, exc_value, exc_traceback = sys.exc_info()
                 line_no = exc_traceback.tb_lineno
                 func_name = exc_traceback.tb_frame.f_code.co_name
                 raise Exception(f"{str(e), {line_no}, {func_name}}")
 
         yield {"command": "抢课", "std": "选课提交多次失败，等待下一轮轮询"}
+        yield {
+            "command": "grab-failed",
+            "course_name": course_name,
+            "time": time.strftime("%H:%M:%S"),
+            "reason_raw": "选课提交多次失败，未收到系统提示",
+            "reason_type": "other",
+        }
 
     async def recognize_captcha_race(self, img: bytes) -> Dict[str, Any]:
         """竞速：Qwen OCR 自动识别 vs 用户手动输入，谁先出用谁
@@ -604,6 +688,21 @@ class CourseGrabber:
                 else:
                     available_courses.append(course)
 
+            # 发送余量快照给前端面板（不进日志，每轮都发）
+            # 含可选课程(selected=False) + 已选课程(selected=True)
+            # 已选课程也塞进快照，让用户第一轮就能看到"已选到"，且刚抢到的课在下一轮持续显示不闪现
+            snapshot = [
+                {
+                    "name": re.sub(r"\s+", " ", c["name"].strip()),
+                    "quota": int(c["number"]),
+                    "selected": False,
+                }
+                for c in available_courses
+            ]
+            for fname in finished_courses:
+                snapshot.append({"name": fname, "quota": 0, "selected": True})
+            yield {"command": "quota-snapshot", "courses": snapshot}
+
             if len(available_courses) == 0:
                 yield {"command": "success", "std": "抢课完成"}
                 return
@@ -625,18 +724,6 @@ class CourseGrabber:
                 )
             if course_info:
                 yield {"command": "选课", "std": course_info}
-
-            # 发送余量快照给前端面板（不进日志，每轮都发）
-            yield {
-                "command": "quota-snapshot",
-                "courses": [
-                    {
-                        "name": re.sub(r"\s+", " ", c["name"].strip()),
-                        "quota": int(c["number"]),
-                    }
-                    for c in available_courses
-                ],
-            }
 
             # 检测余量变化：仅当上一轮为 0、本轮 > 0 时通知
             for course in available_courses:
@@ -670,7 +757,7 @@ class CourseGrabber:
                         continue
 
                     # 提交选课
-                    async for result in self.submit_course(course["id"]):
+                    async for result in self.submit_course(course["id"], course_name):
                         yield result
 
         except Exception as e:
