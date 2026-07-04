@@ -493,8 +493,11 @@
                                         :class="{ 'disabled-button': serverOnload }">
                                         {{serverReady ? "停止服务": "启动服务"}}
                                     </button>
-                                    <span v-if="!serverReady" style="color: red; margin-left: 10px;">
+                                    <span v-if="!serverReady && !serverOnload" style="color: red; margin-left: 10px;">
                                         请先点击"启动服务"按钮
+                                    </span>
+                                    <span v-if="!serverReady && serverOnload" style="color: red; margin-left: 10px;">
+                                        正在启动…
                                     </span>
                                     <span v-if="serverReady && !isValidCourseList"
                                         style="color: red; margin-left: 10px;">

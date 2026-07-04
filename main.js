@@ -83,26 +83,29 @@ app.on("activate", function () {
 function waitForServerReady(onReady, onRetry) {
   return new Promise((resolve, reject) => {
     let retries = 0;
-    const maxRetries = 5;
-    const interval = setInterval(() => {
+    const maxRetries = 60;
+
+    function poll() {
       retries++;
-      if (retries >= maxRetries) {
-        clearInterval(interval);
-        reject(new Error("WebSocket 服务启动超时"));
-      }
       const tempWs = new WebSocket("ws://localhost:8765");
       tempWs.on("open", function () {
         ws = tempWs;
         wsStatus = true;
         onReady();
-        clearInterval(interval);
         resolve();
       })
       tempWs.on("error", function () {
         wsStatus = false;
         onRetry();
+        if (retries >= maxRetries) {
+          reject(new Error("WebSocket 服务启动超时"));
+          return;
+        }
+        const delay = retries < 10 ? 300 : 1000;
+        setTimeout(poll, delay);
       });
-    }, 1000);
+    }
+    poll();
   });
 }
 
