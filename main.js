@@ -10,7 +10,7 @@ var kill = require('tree-kill');
 let mainWindow;
 const isMac = process.platform === "darwin";
 let exePath = isMac
-  ? "python3"
+  ? null
   : path.join(__dirname, "./src/bjtupythonstub.exe");
 let stubPath = path.join(__dirname, "./python/bjtupythonstub.py");
 let pythonPath = path.join(__dirname, "./src/login.py");
@@ -169,7 +169,16 @@ ipcMain.handle("start-server", async (event) => {
   if (pythonProcess == null) {
     await checkAndKillPort();
     pythonProcess = isMac
-      ? spawn("python3", [stubPath, pythonPath])
+      ? (() => {
+          const macBinary = path.join(__dirname, "./src/bjtupythonstub-mac");
+          const binaryPath = macBinary.includes("app.asar")
+            ? macBinary.replace("app.asar", "app.asar.unpacked")
+            : macBinary;
+          if (fs.existsSync(binaryPath)) {
+            return spawn(binaryPath, [pythonPath]);
+          }
+          return spawn("python3", [stubPath, pythonPath]);
+        })()
       : spawn(exePath, [pythonPath]);
 
     console.log(pythonProcess.pid)

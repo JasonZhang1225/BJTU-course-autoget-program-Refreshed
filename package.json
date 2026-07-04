@@ -8,7 +8,7 @@
     "dist": "electron-builder --win --x64",
     "dist:mac": "electron-builder --mac --arm64"
   },
-  "license": "MIT",
+  "license": "GPL-3.0",
   "devDependencies": {
     "electron": "^28.1.0",
     "electron-builder": "^24.9.1"
@@ -35,21 +35,25 @@
       "src/icon.icns",
       "python/bjtupythonstub.py",
       "src/bjtupythonstub.exe",
+      "src/bjtupythonstub-mac",
       "package.json",
       "!**/.DS_Store"
     ],
     "win": {
-      "icon": "src/icon.ico"
+      "icon": "src/icon.ico",
+      "artifactName": "Refreshed-${version}-win-${arch}.${ext}"
     },
     "mac": {
       "icon": "src/icon.icns",
-      "target": "dmg"
+      "target": "dmg",
+      "artifactName": "Refreshed-${version}-mac-${arch}.${ext}"
     },
     "asarUnpack": [
       "src/login.py",
       "src/omis.onnx",
       "python/bjtupythonstub.py",
-      "src/bjtupythonstub.exe"
+      "src/bjtupythonstub.exe",
+      "src/bjtupythonstub-mac"
     ]
   }
 }
