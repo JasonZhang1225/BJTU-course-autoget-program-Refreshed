@@ -16,6 +16,14 @@ let stubPath = path.join(__dirname, "./python/bjtupythonstub.py");
 let pythonPath = path.join(__dirname, "./src/login.py");
 let modelPath = path.join(__dirname, "./src/omis.onnx");
 
+if (isMac) {
+  stubPath = stubPath.replace('app.asar', 'app.asar.unpacked');
+} else {
+  exePath = exePath.replace('app.asar', 'app.asar.unpacked');
+}
+pythonPath = pythonPath.replace('app.asar', 'app.asar.unpacked');
+modelPath = modelPath.replace('app.asar', 'app.asar.unpacked');
+
 let ws = null; // 全局 WebSocket 对象
 let pythonProcess = null; // 全局 Python 进程对象
 let wsStatus = false; // WebSocket 状态
@@ -35,14 +43,6 @@ function createWindow() {
 
   // mainWindow.webContents.openDevTools();
   console.log('exePath:', exePath);
-
-  if (isMac) {
-    stubPath = stubPath.replace('app.asar', 'app.asar.unpacked');
-  } else {
-    exePath = exePath.replace('app.asar', 'app.asar.unpacked');
-  }
-  pythonPath = pythonPath.replace('app.asar', 'app.asar.unpacked');
-  modelPath = modelPath.replace('app.asar', 'app.asar.unpacked');
 
   const stubOrExePath = isMac ? stubPath : exePath;
   if (fs.existsSync(stubOrExePath) && fs.existsSync(modelPath) && fs.existsSync(pythonPath)) {
