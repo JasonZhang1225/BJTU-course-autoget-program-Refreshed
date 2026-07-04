@@ -472,6 +472,18 @@ class CourseGrabber:
                     available_courses.append(course)
 
             if len(available_courses) == 0:
+                # 全部选完：发最终快照，全部标记已选到
+                yield {
+                    "command": "quota-snapshot",
+                    "courses": [
+                        {
+                            "name": re.sub(r"\s+", " ", c["name"].strip()),
+                            "quota": 0,
+                            "selected": True,
+                        }
+                        for c in courses
+                    ],
+                }
                 yield {"command": "success", "std": "抢课完成"}
                 return
 
@@ -494,14 +506,20 @@ class CourseGrabber:
                 yield {"command": "选课", "std": course_info}
 
             # 发送余量快照给前端面板（不进日志，每轮都发）
+            # 包含已选和未选全部课程，已选的标记 selected=True
             yield {
                 "command": "quota-snapshot",
                 "courses": [
                     {
                         "name": re.sub(r"\s+", " ", c["name"].strip()),
                         "quota": int(c["number"]),
+                        "selected": False,
                     }
                     for c in available_courses
+                ]
+                + [
+                    {"name": name, "quota": 0, "selected": True}
+                    for name in finished_courses
                 ],
             }
 
