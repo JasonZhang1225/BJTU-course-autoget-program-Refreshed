@@ -32,7 +32,7 @@ class DdddOcr(object):
     ):
         self.__graph_path = import_onnx_path
         # fmt: off
-        self.__charset = [" ", "9", "5", "-", "7", "0", "2", "6", "1", "3", "x", "8", "=", "4", "+"] 
+        self.__charset = [" ", "9", "5", "-", "7", "0", "2", "6", "1", "3", "x", "8", "=", "4", "+"]
         # fmt: on
         self.__resize = [-1, 64]
 
@@ -70,25 +70,66 @@ class DdddOcr(object):
         return "".join(result)
 
 
-def base64_api(img, typeid, tujian_uname, tujian_pwd):
-    base64_data = base64.b64encode(img)
-    b64 = base64_data.decode()
-    data = {
-        "username": tujian_uname,
-        "password": tujian_pwd,
-        "typeid": typeid,
-        "image": b64,
+def qwen_ocr(img: bytes, api_key: str, base_url: str) -> dict:
+    """调用阿里云 Qwen OCR 识别验证码图片
+
+    返回 {"success": True, "result": "xx"} 或 {"success": False, "message": "..."}
+    base_url 示例: https://dashscope.aliyuncs.com/compatible-mode/v1
+    代码会拼成端点在: {base_url}/chat/completions
+    """
+    b64 = base64.b64encode(img).decode()
+    data_url = f"data:image/png;base64,{b64}"
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": "qwen-vl-ocr-latest",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {
+                        "type": "text",
+                        "text": "图中是一个验证码，只输出图中的两个汉字。这两个字是一个语义连贯、现实中有意义的词语，不是两个无关的字。不要任何其他内容。",
+                    },
+                ],
+            }
+        ],
+        "temperature": 0.01,
+        "max_tokens": 10,
     }
-    result = json.loads(requests.post("http://api.ttshitu.com/predict", json=data).text)
-    return result
+    try:
+        resp = requests.post(
+            endpoint,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Qwen HTTP {resp.status_code}: {resp.text[:200]}",
+            }
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        # 清洗输出：只保留前两个中文字符
+        chars = re.findall(r"[一-龥]", content)
+        if len(chars) >= 2:
+            return {"success": True, "result": "".join(chars[:2])}
+        return {"success": False, "message": f"OCR 输出无效: {content[:50]}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "message": "Qwen OCR 请求超时"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "message": f"Qwen OCR 网络错误: {e}"}
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        return {"success": False, "message": f"Qwen OCR 响应解析失败: {e}"}
 
 
 @dataclass
 class CourseConfig:
     """课程配置数据类"""
 
-    api_username: str
-    api_password: str
+    qwen_api_key: str
+    qwen_base_url: str  # 阿里云兼容 endpoint 的 base URL
     senior_check: bool
     monitor_only: bool
     course_list: List[str]
@@ -101,8 +142,7 @@ class CourseConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "CourseConfig":
         # 验证必需字段
         for key in [
-            "apiUsername",
-            "apiPassword",
+            "qwenApiKey",
             "courseList",
             "seniorCheck",
             "monitorOnly",
@@ -115,8 +155,11 @@ class CourseConfig:
                 raise ValueError(f"数据中缺少{key}字段")
 
         return cls(
-            api_username=data["apiUsername"],
-            api_password=data["apiPassword"],
+            qwen_api_key=data["qwenApiKey"],
+            qwen_base_url=data.get(
+                "qwenBaseUrl",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
             course_list=[course.strip() for course in data["courseList"].split(",")],
             senior_check=data["seniorCheck"],
             monitor_only=data["monitorOnly"],
@@ -147,6 +190,7 @@ class CourseGrabber:
         self.cookie = None
         self.session = requests.Session()
         self.last_quotas: Dict[str, int] = {}
+        self.manual_captcha_queue: asyncio.Queue = asyncio.Queue()
 
     async def login(self, send) -> None:
         """登录获取会话。send 是一个 async 回调，用于把消息发给前端。
@@ -355,7 +399,7 @@ class CourseGrabber:
             return
 
     async def submit_course(self, course_id: str):
-        """提交选课请求"""
+        """提交选课请求（Qwen OCR + 手动竞速；验证码错误时刷新重试一次）"""
         BASE_HEADERS = {
             "accept": "*/*",
             "origin": "https://aa.bjtu.edu.cn",
@@ -365,78 +409,167 @@ class CourseGrabber:
             "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
             "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
         }
-        self.session.headers.update(BASE_HEADERS)
-        try:
-            response = await asyncio.to_thread(
-                self.session.get, "https://aa.bjtu.edu.cn/captcha/refresh/"
-            )
-            key = response.json()["key"]
-            captcha_img_url = f"https://aa.bjtu.edu.cn/captcha/image/{key}"
-            response = await asyncio.to_thread(self.session.get, captcha_img_url)
-            img = response.content
-            start_time = time.time()
-            b64 = "data:image/png;base64," + base64.b64encode(img).decode()
-            yield {
-                "command": "captcha-image",
-                "image": b64,
-                "result": "正在识别...",
-                "process_time": "",  # 显示为毫秒
-            }
-            result = base64_api(
-                img, 16, self.config.api_username, self.config.api_password
-            )
-            process_time = round((time.time() - start_time) * 1000)
+        for attempt in range(2):
+            # 每次重试都重置 headers，避免上一次 POST 留下的 content-type 污染 GET 请求
+            self.session.headers.update(BASE_HEADERS)
+            # 清理可能残留的 content-type（来自上一次 POST）
+            self.session.headers.pop("content-type", None)
 
-            if result["success"]:
-                result = result["data"]["result"]
+            try:
+                response = await asyncio.to_thread(
+                    self.session.get,
+                    "https://aa.bjtu.edu.cn/captcha/refresh/",
+                )
+                key = response.json()["key"]
+                captcha_img_url = f"https://aa.bjtu.edu.cn/captcha/image/{key}"
+                response = await asyncio.to_thread(
+                    self.session.get, captcha_img_url
+                )
+                img = response.content
+                b64 = "data:image/png;base64," + base64.b64encode(img).decode()
                 yield {
                     "command": "captcha-image",
                     "image": b64,
-                    "result": result,
-                    "process_time": f"{process_time}ms",  # 显示为毫秒
+                    "result": "识别中...",
+                    "process_time": "",
                 }
-            else:
-                raise Exception("图鉴: " + result["message"])
-            payload = (
-                f"checkboxs={course_id}&hashkey={key}&answer={parse.quote(result)}"
-            )
-            self.session.headers.update(
-                {
-                    "content-type": "application/x-www-form-urlencoded",
+
+                start_time = time.time()
+                result = await self.recognize_captcha_race(img)
+                process_time = round((time.time() - start_time) * 1000)
+
+                if not result["success"]:
+                    yield {
+                        "command": "captcha-image",
+                        "image": b64,
+                        "result": f"识别失败: {result.get('message', '未知错误')}",
+                        "process_time": f"{process_time}ms",
+                    }
+                    if attempt == 0:
+                        yield {
+                            "command": "抢课",
+                            "std": f"验证码识别失败，刷新重试: {result.get('message', '')}",
+                        }
+                        continue
+                    yield {
+                        "command": "抢课",
+                        "error": f"验证码识别失败，放弃本轮: {result.get('message', '')}",
+                    }
+                    return
+
+                answer = result["result"]
+                yield {
+                    "command": "captcha-image",
+                    "image": b64,
+                    "result": answer,
+                    "process_time": f"{process_time}ms",
+                    "source": result.get("source", ""),
                 }
-            )
-            response = await asyncio.to_thread(
-                self.session.post,
-                "https://aa.bjtu.edu.cn/course_selection/courseselecttask/selects_action/?action=submit",
-                data=payload,
-                allow_redirects=False,
-            )
-            await asyncio.sleep(0.1)
 
-            self.session.headers.update(
-                {
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                    "cache-control": "max-age=0",
-                }
-            )
+                payload = f"checkboxs={course_id}&hashkey={key}&answer={parse.quote(answer)}"
+                self.session.headers.update(
+                    {"content-type": "application/x-www-form-urlencoded"}
+                )
+                response = await asyncio.to_thread(
+                    self.session.post,
+                    "https://aa.bjtu.edu.cn/course_selection/courseselecttask/selects_action/?action=submit",
+                    data=payload,
+                    allow_redirects=False,
+                )
 
-            response = await asyncio.to_thread(
-                self.session.get,
-                "https://aa.bjtu.edu.cn/course_selection/courseselecttask/selects/",
-            )
-        except requests.exceptions.RequestException as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            line_no = exc_traceback.tb_lineno
-            func_name = exc_traceback.tb_frame.f_code.co_name
-            raise Exception(f"{str(e), {line_no}, {func_name}}")
+                self.session.headers.update(
+                    {
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "cache-control": "max-age=0",
+                    }
+                )
 
-        text = response.text
-        messages = re.findall(r'message \+= "(.*)<br/>";', text)
-        if messages:
-            yield {"command": "抢课", "std": messages[0]}
-            # 抢课成功时额外标记，前端据此发桌面通知
-            if "成功" in messages[0]:
-                yield {"command": "grab-success", "std": messages[0]}
+                response = await asyncio.to_thread(
+                    self.session.get,
+                    "https://aa.bjtu.edu.cn/course_selection/courseselecttask/selects/",
+                )
+                text = response.text
+                messages = re.findall(r'message \+= "(.*)<br/>";', text)
+                if messages:
+                    msg = messages[0]
+                    if "验证码" in msg and attempt == 0:
+                        yield {
+                            "command": "抢课",
+                            "std": "验证码错误，刷新重试...",
+                        }
+                        continue
+                    yield {"command": "抢课", "std": msg}
+                    if "成功" in msg:
+                        yield {"command": "grab-success", "std": msg}
+                    return
+
+            except requests.exceptions.RequestException as e:
+                if attempt == 0:
+                    yield {
+                        "command": "抢课",
+                        "std": f"网络请求失败，刷新重试: {str(e)}",
+                    }
+                    continue
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                line_no = exc_traceback.tb_lineno
+                func_name = exc_traceback.tb_frame.f_code.co_name
+                raise Exception(f"{str(e), {line_no}, {func_name}}")
+
+        yield {"command": "抢课", "std": "选课提交多次失败，等待下一轮轮询"}
+
+    async def recognize_captcha_race(self, img: bytes) -> Dict[str, Any]:
+        """竞速：Qwen OCR 自动识别 vs 用户手动输入，谁先出用谁
+
+        返回格式：{"success": True, "result": "xx", "source": "手动输入"|"qwen-vl-ocr"}
+                 或 {"success": False, "message": "..."}
+        """
+        # 丢弃前一次可能残留的手动输入
+        while not self.manual_captcha_queue.empty():
+            try:
+                self.manual_captcha_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        qwen_task = asyncio.create_task(
+            asyncio.to_thread(
+                qwen_ocr, img, self.config.qwen_api_key, self.config.qwen_base_url
+            )
+        )
+        manual_task = asyncio.create_task(self.manual_captcha_queue.get())
+
+        deadline = time.monotonic() + 5
+        pending = {qwen_task, manual_task}
+
+        try:
+            while pending and time.monotonic() < deadline:
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=(deadline - time.monotonic()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if manual_task in done:
+                    # 手动结果先到，使用手动
+                    qwen_task.cancel()
+                    return {
+                        "success": True,
+                        "result": manual_task.result(),
+                        "source": "手动输入",
+                    }
+
+                if qwen_task in done:
+                    qwen_result = qwen_task.result()
+                    if qwen_result["success"]:
+                        manual_task.cancel()
+                        return {**qwen_result, "source": "qwen-vl-ocr"}
+                    # Qwen 失败，继续等手动（如果有剩余时间）
+
+            return {"success": False, "message": "识别超时或失败"}
+
+        finally:
+            for t in (qwen_task, manual_task):
+                if not t.done():
+                    t.cancel()
 
     async def fetch_and_handle_data(self) -> Generator[Dict[str, Any], None, None]:
         """获取并处理课程数据"""
@@ -472,18 +605,6 @@ class CourseGrabber:
                     available_courses.append(course)
 
             if len(available_courses) == 0:
-                # 全部选完：发最终快照，全部标记已选到
-                yield {
-                    "command": "quota-snapshot",
-                    "courses": [
-                        {
-                            "name": re.sub(r"\s+", " ", c["name"].strip()),
-                            "quota": 0,
-                            "selected": True,
-                        }
-                        for c in courses
-                    ],
-                }
                 yield {"command": "success", "std": "抢课完成"}
                 return
 
@@ -506,20 +627,14 @@ class CourseGrabber:
                 yield {"command": "选课", "std": course_info}
 
             # 发送余量快照给前端面板（不进日志，每轮都发）
-            # 包含已选和未选全部课程，已选的标记 selected=True
             yield {
                 "command": "quota-snapshot",
                 "courses": [
                     {
                         "name": re.sub(r"\s+", " ", c["name"].strip()),
                         "quota": int(c["number"]),
-                        "selected": False,
                     }
                     for c in available_courses
-                ]
-                + [
-                    {"name": name, "quota": 0, "selected": True}
-                    for name in finished_courses
                 ],
             }
 
@@ -677,6 +792,13 @@ class WebSocketServer:
                     await websocket.send(
                         json.dumps({"command": "finished", "std": "任务已停止"})
                     )
+                elif input_data.get("command") == "manual-captcha":
+                    # 手动输入验证码——放入队列供抢课线程竞速使用
+                    answer = input_data.get("answer", "").strip()
+                    if client_id in self.grabbers and re.match(
+                        r"^[一-龥]{2}$", answer
+                    ):
+                        self.grabbers[client_id].manual_captcha_queue.put_nowait(answer)
                 else:
                     if client_id in self.grab_course_tasks:
                         self.grab_course_tasks[client_id].cancel()

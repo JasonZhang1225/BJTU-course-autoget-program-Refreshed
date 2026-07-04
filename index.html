@@ -423,21 +423,21 @@
                                 </td>
                             </tr>
                             <tr>
-                                <td><label for="api-username">图鉴api账户名</label></td>
-                                <td><input type="text" id="api-username" name="api-username" required>
+                                <td><label for="qwen-api-key">阿里云 API Key</label></td>
+                                <td><input type="password" id="qwen-api-key" name="qwen-api-key" required>
                                 </td>
                                 <td rowspan="2">
-                                    <p>本程序需要使用图鉴api进行验证码识别。<br>
-                                        <a href="#" @click.prevent="openInBrowser('http://www.ttshitu.com/')"
+                                    <p>使用阿里云 Qwen OCR 识别选课验证码。<br>
+                                        <a href="#" @click.prevent="openInBrowser('https://bailian.console.aliyun.com/')"
                                             style="color: blue; text-decoration: underline;">
-                                            http://www.ttshitu.com/
+                                            阿里云百炼
                                         </a>
                                     </p>
                                 </td>
                             </tr>
                             <tr>
-                                <td><label for="api-password">图鉴api密码</label></td>
-                                <td><input type="password" id="api-password" name="api-password" required></td>
+                                <td><label for="qwen-base-url">阿里云 Base URL</label></td>
+                                <td><input type="text" id="qwen-base-url" name="qwen-base-url" value="https://dashscope.aliyuncs.com/compatible-mode/v1"></td>
                             </tr>
                             <tr>
                                 <td><label for="course-list">选课列表</label></td>
@@ -498,14 +498,7 @@
                     <colgroup>
                         <col style="width: 50%;" />
                         <col style="width: 50%;" />
-                        <!-- <col style="width: 33.33%;" /> -->
                     </colgroup>
-                    <tr>
-                        <td>图鉴实时余额</td>
-                        <td>
-                            <div id="balance">{{ balance }}</div>
-                        </td>
-                    </tr>
                     <tr>
                         <td>验证码</td>
                         <td>
@@ -525,8 +518,12 @@
                         </td>
                     </tr>
                     <tr>
-                        <td colspan="2">
-                            <button @click="fetchBalance">获取余额</button>
+                        <td>手动输入验证码</td>
+                        <td>
+                            <input type="text" id="manual-captcha" v-model="manualCaptcha" maxlength="2"
+                                placeholder="两个汉字" />
+                            <button @click="submitManualCaptcha"
+                                :disabled="!manualCaptcha || manualCaptcha.length !== 2">提交</button>
                         </td>
                     </tr>
                 </table>
@@ -603,10 +600,10 @@
                 serverOnload: false,
                 seniorCheck: false, // 是否抢高级课程，默认为false
                 monitorOnly: false, // 只监控不抢课，默认为false
-                balance: NaN,
                 imageUrl: "",
                 isRunning: false,
                 quotas: [], // 课程余量监控面板数据
+                manualCaptcha: "",
                 // 计时器状态
                 timerState: 'idle',     // idle | running | paused | finished
                 timerAccumulated: 0,    // 累计毫秒（不含当前进行段）
@@ -632,24 +629,23 @@
                     }
                     const username = document.getElementById('username').value;
                     const password = document.getElementById('password').value;
-                    const apiUsername = document.getElementById('api-username').value;
-                    const apiPassword = document.getElementById('api-password').value;
+                    const qwenApiKey = document.getElementById('qwen-api-key').value;
+                    const qwenBaseUrl = document.getElementById('qwen-base-url').value;
                     invoke('saveConfig', {
                         username,
                         password,
-                        apiUsername,
-                        apiPassword,
+                        qwenApiKey,
+                        qwenBaseUrl,
                         courseList: this.courseList,
                         courseType: this.courseType,
                         seniorCheck: this.seniorCheck,
                         monitorOnly: this.monitorOnly
                     });
-                    this.fetchBalance();
                     send('login-request', {
                         username,
                         password,
-                        apiUsername,
-                        apiPassword,
+                        qwenApiKey,
+                        qwenBaseUrl,
                         courseList: this.courseList,
                         courseType: this.courseType,
                         seniorCheck: this.seniorCheck,
@@ -669,29 +665,11 @@
                 scrollToBottom() {
                     this.$refs.messageList.scrollTop = this.$refs.messageList.scrollHeight;
                 },
-                fetchBalance() {
-                    const apiUsername = document.getElementById('api-username').value;
-                    const apiPassword = document.getElementById('api-password').value;
-                    if (apiUsername && apiPassword) {
-                        fetch(`http://api.ttshitu.com/queryAccountInfo.json?username=${apiUsername}&password=${apiPassword}`)
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.success) {
-                                    console.log("账户余额", data.data.balance)
-                                    this.balance = data.data.balance;
-                                } else {
-                                    this.balance = NaN;
-                                    this.messages.push({
-                                        "command": "获取余额",
-                                        "error": "请求失败:" + data.message
-                                    });
-                                    console.error('请求失败:', data.message);
-                                }
-                            })
-                            .catch(error => { console.error('请求错误:', error) });
-                    } else {
-                        console.error('API 用户名和密码不能为空');
-                    }
+                submitManualCaptcha() {
+                    const answer = this.manualCaptcha.trim();
+                    if (!/^[一-龥]{2}$/.test(answer)) return;
+                    send('manual-captcha', { answer });
+                    this.manualCaptcha = '';
                 },
                 startServer() {
                     this.serverOnload = true;
@@ -765,16 +743,19 @@
                 receive('login-response', (data) => {
                     console.log(data.command);
                     if (data.command === 'captcha-image') {
-                        // const base64ImageData = data.image;
-                        // const decodedImageData = atob(base64ImageData);
-                        // const captchaImage = document.getElementById('captcha-image');
-                        // captchaImage.src = `data:image/jpeg;base64,${btoa(decodedImageData)}`;
                         const captchaImage = document.getElementById('captcha-image');
                         this.imageUrl = data.image;
                         const captchaResult = document.getElementById('captcha-result');
                         captchaResult.innerHTML = data.result;
                         const captchaTime = document.getElementById('captcha-time');
-                        captchaTime.innerHTML = data.process_time;
+                        if (data.source) {
+                            captchaTime.innerHTML = `${data.process_time} (${data.source})`;
+                        } else {
+                            captchaTime.innerHTML = data.process_time;
+                        }
+                        if (data.result === '识别中...') {
+                            this.manualCaptcha = '';
+                        }
                     } else if (data.command === 'finished' || data.command === 'Python error') {
                         this.isRunning = false;
                         // 停止时已由 stopProcess 主动 timerPause；
@@ -818,8 +799,8 @@
                     if (data) {
                         document.getElementById('username').value = data.username || '';
                         document.getElementById('password').value = data.password || '';
-                        document.getElementById('api-username').value = data.apiUsername || '';
-                        document.getElementById('api-password').value = data.apiPassword || '';
+                        document.getElementById('qwen-api-key').value = data.qwenApiKey || '';
+                        document.getElementById('qwen-base-url').value = data.qwenBaseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
                         this.courseList = data.courseList || '';
                         this.courseType = data.courseType || '';
                         this.seniorCheck = data.seniorCheck || false;

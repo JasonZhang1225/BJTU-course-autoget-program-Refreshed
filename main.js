@@ -274,6 +274,13 @@ ipcMain.on("login-request", (event, data) => {
   ws.on('message', messageHandler);
 });
 
+ipcMain.on("manual-captcha", (event, data) => {
+  data.command = "manual-captcha";
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+});
+
 ipcMain.handle("stop-request", (event) => {
   ws.send(JSON.stringify({ command: "stop" }));
 });
